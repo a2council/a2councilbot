@@ -1,33 +1,40 @@
 import argparse
 import datetime
+from datetime import timezone
+import glob
 import logging
+import pathlib
 import re
 import requests
 import json
 import time
 import sys
 
-from oauthlib.oauth2 import WebApplicationClient    
+import pytz
+from oauthlib.oauth2 import WebApplicationClient
+
 
 class MockTwitterApiClient:
-    def __init__(self, client_id, client_secret, refresh_token):
-        self.refresh_token = refresh_token
-        self.client_id = client_id
-        self.client_secret = client_secret
+    def __init__(self, creds_file=None):
+        pass
 
     def refresh_creds(self):
         pass
 
     def send_tweet(self, message, in_reply_to=None):
-        logging.info("SEND TWEET ({})".format(len(message)))
-        return None
+        logging.info("would send tweet ({}): {}".format(len(message), message))
+        return "hi_this_is_a_tweet_id"
+
 
 class TwitterApiClient:
-    def __init__(self, client_id, client_secret, refresh_token):
-        self.client = WebApplicationClient(client_id)
-        self.refresh_token = refresh_token
-        self.client_id = client_id
-        self.client_secret = client_secret
+    def __init__(self, creds_filename):
+        self.creds_filename = creds_filename
+        with open(creds_filename, "r") as fp:
+            creds_dict = json.load(fp)
+        self.refresh_token = creds_dict["refresh_token"]
+        self.client_id = creds_dict["client_id"]
+        self.client_secret = creds_dict["client_secret"]
+        self.client = WebApplicationClient(self.client_id)
 
         self.bearer_token = None
         self.bearer_token_expire = 0
@@ -44,11 +51,22 @@ class TwitterApiClient:
             raise RuntimeError(str(r))
 
         self.refresh_token = r["refresh_token"]
+        with open(self.creds_filename, "w") as fp:
+            json.dump(
+                {
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "refresh_token": self.refresh_token,
+                },
+                fp,
+            )
         self.bearer_token = r["access_token"]
         self.bearer_token_expire = time.time() + (r["expires_in"] - 60)
         pass
 
     def send_tweet(self, message, in_reply_to=None):
+        logging.info("Sending Tweet: {}".format(message))
+
         if time.time() > self.bearer_token_expire:
             self.refresh_creds()
 
@@ -72,31 +90,89 @@ class TwitterApiClient:
         # TODO: ERROR HANDLING
         return r["data"]["id"]
 
+
 class LegistarMinutesSource:
     def __init__(self, event_id):
         self.event_id = event_id
 
     def get_current_time(self):
-        return datetime.datetime.now()
+        return datetime.datetime.now(timezone.utc)
 
     def wait(self, seconds):
         time.sleep(seconds)
 
-    def get_minutes():
-        pass
+    def get_minutes(self):
+        logging.info("Starting new polling run...")
+        with requests.Session() as s:
+            event = s.get(
+                f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}",
+            ).json()
+
+            eventitems = s.get(
+                f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}/eventitems",
+                # params={
+                #     "$filter": "EventItemLastModifiedUtc gt datetime'{}'".format(
+                #         last_updated
+                #     ),
+                # },
+            ).json()
+            # "or 0" because sometimes it's None and that throws exceptions
+            eventitems = sorted(
+                eventitems, key=lambda e: e["EventItemMinutesSequence"] or 0
+            )
+            event["EventItems"] = eventitems
+
+            for item in eventitems:
+                # TODO: only fetch if recently updated
+                event_item_id = item["EventItemId"]
+                item["EventItemVoteInfo"] = s.get(
+                    f"https://webapi.legistar.com/v1/a2gov/eventitems/{event_item_id}/votes"
+                ).json()
+
+        # last_updated = max(
+        #     [ei["EventItemLastModifiedUtc"] for ei in eventitems] + [last_updated]
+        # )
+        logging.info("Polling run complete")
+        return event
+
 
 class MockMinutesSource:
-    def __init__(self, file_prefix):
-        pass
+    MEETING_OVER = object()
+
+    def __init__(self, file_prefix, file_suffix=".json"):
+        self.files = sorted(
+            [
+                p
+                for p in pathlib.Path(".").glob(
+                    "{}*{}".format(glob.escape(file_prefix), glob.escape(file_suffix))
+                )
+            ]
+        )
+        self._idx = 0
 
     def get_current_time(self):
-        pass
+        current_file = self.files[self._idx]
+        date_string = current_file.name.rsplit(".", 1)[0][-15:]
+        dt = datetime.datetime.strptime(date_string, "%Y%m%dT%H%M%S")
+        dt = dt.replace(tzinfo=timezone.utc)
+        return dt
 
     def wait(self, seconds):
-        pass
+        now = self.get_current_time()
+        while self.get_current_time() < (now + datetime.timedelta(seconds=seconds)):
+            if self._idx >= len(self.files):
+                return
+            self._idx += 1
 
-    def get_minutes():
-        pass
+    def get_minutes(self):
+        logging.info(
+            "Starting new mock polling run at {}...".format(self.get_current_time())
+        )
+        if self._idx >= len(self.files):
+            return self.MEETING_OVER
+        with open(self.files[self._idx], "r") as fp:
+            return json.load(fp)
+
 
 ACTION_TENSE_MAP = {
     "Accepted": "Accept",
@@ -133,7 +209,11 @@ def fixup_minutes(eventitems):
         if item["EventItemAgendaNumber"] == "E":
             interesting_agenda_items = False
 
-        if item["EventItemAgendaNumber"] is None and interesting_agenda_items and last_agenda_number is not None:
+        if (
+            item["EventItemAgendaNumber"] is None
+            and interesting_agenda_items
+            and last_agenda_number is not None
+        ):
             if re.match(r"[a-zA-Z]{1,2}-[0-9]+", last_agenda_number):
                 item["EventItemAgendaNumber"] = last_agenda_number
         last_agenda_number = item["EventItemAgendaNumber"]
@@ -174,49 +254,40 @@ def process_event_item(ei, previous_ei):
         if len(title) < remaining:
             output = prefix + title + suffix
         else:
-            output = prefix + title[:remaining-3] + "..." + suffix
+            output = prefix + title[: remaining - 3] + "..." + suffix
 
         return output
+    else:
+        return None
 
 
-def collect_minutes(event_id, last_updated="1970-01-01"):
-    logging.info("Starting new polling run...")
-    with requests.Session() as s:
-        event = s.get(
-            f"https://webapi.legistar.com/v1/a2gov/events/{event_id}",
-        ).json()
-
-        eventitems = s.get(
-            f"https://webapi.legistar.com/v1/a2gov/events/{event_id}/eventitems",
-            # params={
-            #     "$filter": "EventItemLastModifiedUtc gt datetime'{}'".format(
-            #         last_updated
-            #     ),
-            # },
-        ).json()
-        # "or 0" because sometimes it's None and that throws exceptions
-        eventitems = sorted(
-            eventitems, key=lambda e: e["EventItemMinutesSequence"] or 0
-        )
-        event["EventItems"] = eventitems
-
-        for item in eventitems:
-            # TODO: only fetch if recently updated
-            event_item_id = item["EventItemId"]
-            item["EventItemVoteInfo"] = s.get(
-                f"https://webapi.legistar.com/v1/a2gov/eventitems/{event_item_id}/votes"
-            ).json()
-
-    last_updated = max(
-        [ei["EventItemLastModifiedUtc"] for ei in eventitems] + [last_updated]
+def get_meeting_start(event):
+    dt = datetime.datetime.strptime(
+        event["EventDate"].split("T")[0] + " " + event["EventTime"], "%Y-%m-%d %I:%M %p"
     )
-    logging.info("Polling run complete")
-    return event, last_updated
+    dt = dt.replace(tzinfo=pytz.timezone("America/Detroit"))
+    return dt
+
+
+def has_meeting_ended(eventitems, start, now):
+    for ei in eventitems:
+        if ei["EventItemActionName"] == "Adjourn" and ei["EventItemPassedFlag"]:
+            return True
+
+    # failsafe - assume the meeting has ended if 12h have elapsed!
+    if now > (start + datetime.timedelta(12)):
+        return True
+
+    return False
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("event_id")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--event-id", help="event id to query in Legistar")
+    group.add_argument(
+        "--event-file-pattern", help="run parser against stored json files"
+    )
     parser.add_argument("--mock", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -224,7 +295,7 @@ def main():
         level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
-    state = {"known_event_items": {}, "last_tweet_id": None, "refresh_token": None}
+    state = {"event_id": None, "known_event_items": {}, "last_tweet_id": None}
     try:
         with open("state.json", "r") as fp:
             state = json.load(fp)
@@ -232,29 +303,47 @@ def main():
         logging.debug("Could not load state file: {}".format(e))
 
     twitter_client_class = TwitterApiClient if not args.mock else MockTwitterApiClient
-    refresh_token = state["refresh_token"]
-    if refresh_token is None:
-        refresh_token = "xxxx"
-    client = twitter_client_class(
-        "xxxx",
-        "xxxx",
-        refresh_token,
-    )
+    client = twitter_client_class("twitter_creds.json")
+
     # get initial creds *now* to ensure they work
     client.refresh_creds()
 
+    if args.event_id is not None:
+        minutes_source = LegistarMinutesSource(args.event_id)
+    else:
+        minutes_source = MockMinutesSource(args.event_file_pattern)
+
     while True:
-        # HACK wait for the meeting to start
-        now = datetime.datetime.now()
-        # XXX get this out of the actual event info!
-        start = now.replace(hour=19, minute=0, second=0, microsecond=0)
-        if now < start:
-            logging.info("Meeting hasn't started yet - now {}, start {}".format(now, start))
-            time.sleep(60)
+        event = None
+        try:
+            event = minutes_source.get_minutes()
+            if event is MockMinutesSource.MEETING_OVER:
+                break
+        except Exception:
+            logging.exception("Polling run failed!")
+
+        now = minutes_source.get_current_time()
+        meeting_start_time = get_meeting_start(event)
+        if now < meeting_start_time:
+            logging.info(
+                "Meeting hasn't started yet - now {}, start {}".format(
+                    now, meeting_start_time
+                )
+            )
+            minutes_source.wait(60)
             continue
 
         try:
-            event, _ = collect_minutes(args.event_id)
+            # check for mismatch in event id in saved state!
+            if state["event_id"] is not None and state["event_id"] != event["EventId"]:
+                logging.warning("Event ID mismatches saved state. Clearing saved state!")
+                state = {"event_id": None, "known_event_items": {}, "last_tweet_id": None}
+
+            # store current event id
+            if state["event_id"] is None:
+                state["event_id"] = event["EventId"]
+
+            # start the twitter thread
             if not state["last_tweet_id"]:
                 state["last_tweet_id"] = client.send_tweet(
                     "#a2council voting results thread for {}...\n\n\U0001F9F5".format(
@@ -269,19 +358,23 @@ def main():
                 previous_ei = state["known_event_items"].get(guid)
                 output = process_event_item(ei, previous_ei)
                 if output:
-                    logging.info("Sending Tweet: {}".format(output))
                     state["last_tweet_id"] = client.send_tweet(
                         output, state["last_tweet_id"]
                     )
                 state["known_event_items"][guid] = ei
         except Exception:
-            logging.exception("Polling run failed!")
+            logging.exception("Processing minutes failed!")
 
-        state["refresh_token"] = client.refresh_token
+        # store updated state
         with open("state.json", "w") as fp:
             json.dump(state, fp)
         sys.stdout.flush()
-        time.sleep(60)
+
+        if has_meeting_ended(eventitems, meeting_start_time, now):
+            logging.info("Meeting adjourned or timed out!")
+            break
+        else:
+            minutes_source.wait(60)
 
 
 if __name__ == "__main__":
