@@ -228,6 +228,7 @@ def process_event_item(ei, previous_ei):
             not ei["EventItemAgendaNumber"]
             or re.match(r"^(MC|CC|B|C|D).*$", ei["EventItemAgendaNumber"])
         )
+        and ei["EventItemTitle"].lower() != "passed on consent agenda"
     ):
         if ei["EventItemAgendaNumber"] is not None:
             prefix = "{}: ".format(ei["EventItemAgendaNumber"])
