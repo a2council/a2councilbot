@@ -321,6 +321,8 @@ def main():
                 break
         except Exception:
             logging.exception("Polling run failed!")
+            minutes_source.wait(60)
+            continue
 
         now = minutes_source.get_current_time()
         meeting_start_time = get_meeting_start(event)
