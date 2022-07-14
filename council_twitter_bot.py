@@ -271,7 +271,7 @@ def get_meeting_start(event):
     dt = datetime.datetime.strptime(
         event["EventDate"].split("T")[0] + " " + event["EventTime"], "%Y-%m-%d %I:%M %p"
     )
-    dt = dt.replace(tzinfo=pytz.timezone("America/Detroit"))
+    dt = pytz.timezone("America/Detroit").localize(dt)
     return dt
 
 
