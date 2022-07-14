@@ -201,32 +201,38 @@ def fixup_action_tense(action_name):
 
 def fixup_minutes(eventitems):
     # XXX should maybe do this with Matter ID matching instead?
-    last_agenda_number = None
-    interesting_agenda_items = False
-    for item in eventitems:
-        if item["EventItemAgendaNumber"] == "CA":
-            interesting_agenda_items = True
-        if item["EventItemAgendaNumber"] == "E":
-            interesting_agenda_items = False
+    matter_to_agenda_number = {}
 
-        if (
-            item["EventItemAgendaNumber"] is None
-            and interesting_agenda_items
-            and last_agenda_number is not None
-        ):
-            if re.match(r"[a-zA-Z]{1,2}-[0-9]+", last_agenda_number):
-                item["EventItemAgendaNumber"] = last_agenda_number
-        last_agenda_number = item["EventItemAgendaNumber"]
+    # first pass to map Matter ID to Agenda Number
+    for item in eventitems:
+        if item["EventItemMatterId"] is not None:
+            if item["EventItemAgendaNumber"] is not None:
+                matter_to_agenda_number[item["EventItemMatterId"]] = item[
+                    "EventItemAgendaNumber"
+                ]
+
+    # 2nd pass to fill in missing Agenda Numbers
+    for item in eventitems:
+        if item["EventItemMatterId"] is not None:
+            if item["EventItemAgendaNumber"] is None:
+                item["EventItemAgendaNumber"] = matter_to_agenda_number.get(
+                    item["EventItemMatterId"]
+                )
 
 
 def process_event_item(ei, previous_ei):
     if (
         ei["EventItemPassedFlag"] is not None
         and (previous_ei is None or previous_ei["EventItemPassedFlag"] is None)
-        and ei["EventItemAgendaNumber"]
-        and re.match(r"^(MC|CC|B|C|D).*$", ei["EventItemAgendaNumber"])
+        and (
+            not ei["EventItemAgendaNumber"]
+            or re.match(r"^(MC|CC|B|C|D).*$", ei["EventItemAgendaNumber"])
+        )
     ):
-        prefix = "{}: ".format(ei["EventItemAgendaNumber"])
+        if ei["EventItemAgendaNumber"] is not None:
+            prefix = "{}: ".format(ei["EventItemAgendaNumber"])
+        else:
+            prefix = ""
 
         action_name = fixup_action_tense(ei["EventItemActionName"])
         suffix = "\nAction: {} ({})\n".format(
@@ -338,8 +344,14 @@ def main():
         try:
             # check for mismatch in event id in saved state!
             if state["event_id"] is not None and state["event_id"] != event["EventId"]:
-                logging.warning("Event ID mismatches saved state. Clearing saved state!")
-                state = {"event_id": None, "known_event_items": {}, "last_tweet_id": None}
+                logging.warning(
+                    "Event ID mismatches saved state. Clearing saved state!"
+                )
+                state = {
+                    "event_id": None,
+                    "known_event_items": {},
+                    "last_tweet_id": None,
+                }
 
             # store current event id
             if state["event_id"] is None:
