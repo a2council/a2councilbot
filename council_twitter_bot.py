@@ -295,6 +295,11 @@ def main():
     group.add_argument(
         "--event-file-pattern", help="run parser against stored json files"
     )
+    parser.add_argument(
+        "--save-snapshots-in-dir",
+        help="save legistar data in json files for each polling run",
+        metavar="PATH",
+    )
     parser.add_argument("--mock", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -332,6 +337,16 @@ def main():
             continue
 
         now = minutes_source.get_current_time()
+        if args.save_snapshots_in_dir is not None:
+            snapshot_path = pathlib.Path(
+                args.save_snapshots_in_dir,
+                "meeting-{}-{}.json".format(
+                    event["EventId"], now.strftime("%Y%m%dT%H%M%S")
+                ),
+            )
+            with open(snapshot_path, "w") as fp:
+                json.dump(event, fp)
+
         meeting_start_time = get_meeting_start(event)
         if now < meeting_start_time:
             logging.info(
