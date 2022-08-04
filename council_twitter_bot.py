@@ -255,6 +255,8 @@ def process_event_item(ei, previous_ei):
         else:
             suffix += "Voice vote\n"
 
+        suffix += "#a2council"
+
         # the limit should be 280 but I'm gonna just be slightly conservative here...
         remaining = 279 - len(prefix + suffix)
         title = ei["EventItemTitle"]
