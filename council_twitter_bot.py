@@ -6,15 +6,19 @@ import logging
 import pathlib
 import re
 import requests
+from urllib.parse import urlparse
 import json
 import time
 import sys
 
 import pytz
 from oauthlib.oauth2 import WebApplicationClient
+from bs4 import BeautifulSoup
 
 
 class MockTwitterApiClient:
+    TWITTER_URL_LENGTH = 23
+
     def __init__(self, creds_file=None):
         pass
 
@@ -27,6 +31,8 @@ class MockTwitterApiClient:
 
 
 class TwitterApiClient:
+    TWITTER_URL_LENGTH = 23
+
     def __init__(self, creds_filename):
         self.creds_filename = creds_filename
         with open(creds_filename, "r") as fp:
@@ -102,11 +108,48 @@ class LegistarMinutesSource:
         time.sleep(seconds)
 
     def get_minutes(self):
+        matter_file_to_url = {}
+
         logging.info("Starting new polling run...")
         with requests.Session() as s:
             event = s.get(
                 f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}",
             ).json()
+
+            # We cannot construct URLs for individual "matters" in the legistar web UI
+            # based on API information alone. The unique IDs and GUIDs, somehow, have
+            # no relationship to the query params that show up in the website.
+
+            # What we *can* do is scrape the webpage for the event (the API does contain the URL
+            # for this) and find all the links, then map them to matters / eventitems based on
+            # the public-facing "file number"
+            event_url = event["EventInSiteURL"]
+            if event_url:
+                # this should just be "a2gov.legistar.org" but we'll do it the "right" way
+                event_hostname = urlparse(event_url).netloc
+
+                event_page_html = s.get(event["EventInSiteURL"]).text
+
+                try:
+                    soup = BeautifulSoup(event_page_html, "html.parser")
+
+                    # we're looking for links to individual pieces of legislation (a.k.a. "matters")
+                    links = soup.find_all(
+                        "a", href=re.compile(r"LegislationDetail\.aspx.*")
+                    )
+
+                    for link in links:
+                        # The file number will be the inner text of the <a> tag
+                        matter_file = link.get_text().strip()
+                        if matter_file:
+                            file_href = link.attrs.get("href")
+                            matter_file_to_url[matter_file] = "https://{}/{}".format(
+                                event_hostname, file_href
+                            )
+                except Exception:
+                    # scraping HTML is fragile, so if it fails, let's be tolerant of that
+                    # and move on
+                    logging.exception("Failed to parse event page HTML")
 
             eventitems = s.get(
                 f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}/eventitems",
@@ -120,6 +163,10 @@ class LegistarMinutesSource:
             eventitems = sorted(
                 eventitems, key=lambda e: e["EventItemMinutesSequence"] or 0
             )
+            for item in eventitems:
+                matter_file = item["EventItemMatterFile"]
+                if matter_file:
+                    item["EventItemInSiteURL"] = matter_file_to_url.get(matter_file)
             event["EventItems"] = eventitems
 
             for item in eventitems:
@@ -200,7 +247,6 @@ def fixup_action_tense(action_name):
 
 
 def fixup_minutes(eventitems):
-    # XXX should maybe do this with Matter ID matching instead?
     matter_to_agenda_number = {}
 
     # first pass to map Matter ID to Agenda Number
@@ -220,7 +266,7 @@ def fixup_minutes(eventitems):
                 )
 
 
-def process_event_item(ei, previous_ei):
+def process_event_item(ei, previous_ei, twitter_client):
     if (
         ei["EventItemPassedFlag"] is not None
         and (previous_ei is None or previous_ei["EventItemPassedFlag"] is None)
@@ -259,12 +305,22 @@ def process_event_item(ei, previous_ei):
 
         # the limit should be 280 but I'm gonna just be slightly conservative here...
         remaining = 279 - len(prefix + suffix)
-        title = ei["EventItemTitle"]
-        if len(title) < remaining:
-            output = prefix + title + suffix
-        else:
-            output = prefix + title[: remaining - 3] + "..." + suffix
 
+        # if we have a URL for the event item's associated matter, then add it. (Twitter
+        # will auto-shorten all URLs to a fixed length, so we need to account for that
+        # in our character count)
+        legistar_url = ""
+        if ei.get("EventItemInSiteURL"):
+            remaining -= (twitter_client.TWITTER_URL_LENGTH + 1)
+            legistar_url = "\n" + ei["EventItemInSiteURL"]
+        
+        # Truncate the title as needed
+        title = ei["EventItemTitle"]
+        if len(title) >= remaining:
+            title = title[: remaining - 3] + "..."
+
+        # put it all together
+        output = prefix + title + legistar_url + suffix
         return output
     else:
         return None
@@ -388,7 +444,7 @@ def main():
             for ei in eventitems:
                 guid = ei["EventItemGuid"]
                 previous_ei = state["known_event_items"].get(guid)
-                output = process_event_item(ei, previous_ei)
+                output = process_event_item(ei, previous_ei, client)
                 if output:
                     state["last_tweet_id"] = client.send_tweet(
                         output, state["last_tweet_id"]
