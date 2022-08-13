@@ -62,7 +62,7 @@ COUNCILMEMBERS = (
     "Grand",
     "Radina",
     "Eyer",
-    "Belson",
+    "Nelson",
     "Briggs",
     "Ramlawi",
 )
