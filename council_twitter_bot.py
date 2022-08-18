@@ -153,11 +153,6 @@ class LegistarMinutesSource:
 
             eventitems = s.get(
                 f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}/eventitems",
-                # params={
-                #     "$filter": "EventItemLastModifiedUtc gt datetime'{}'".format(
-                #         last_updated
-                #     ),
-                # },
             ).json()
             # "or 0" because sometimes it's None and that throws exceptions
             eventitems = sorted(
@@ -176,9 +171,6 @@ class LegistarMinutesSource:
                     f"https://webapi.legistar.com/v1/a2gov/eventitems/{event_item_id}/votes"
                 ).json()
 
-        # last_updated = max(
-        #     [ei["EventItemLastModifiedUtc"] for ei in eventitems] + [last_updated]
-        # )
         logging.info("Polling run complete")
         return event
 
