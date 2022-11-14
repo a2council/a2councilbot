@@ -56,15 +56,15 @@ def get_display_agenda_number(event_item):
 COUNCILMEMBERS = (
     "Taylor",
     "Disch",
-    "Hayner",
+    "Harrison",
     "Song",
-    "Griswold",
+    "Watson",
     "Radina",
-    "Grand",
+    "Ghazi-Edwin",
     "Eyer",
-    "Nelson",
+    "Akmon",
     "Briggs",
-    "Ramlawi",
+    "Cornell",
 )
 
 
@@ -136,15 +136,15 @@ def main():
             "Agenda Item",
             "Mayor Taylor",
             "Disch (Ward 1)",
-            "Hayner (Ward 1)",
+            "Harrison (Ward 1)",
             "Song (Ward 2)",
-            "Griswold (Ward 2)",
+            "Watson (Ward 2)",
             "Radina (Ward 3)",
-            "Grand (Ward 3)",
+            "Ghazi-Edwin (Ward 3)",
             "Eyer (Ward 4)",
-            "Nelson (Ward 4)",
+            "Akmon (Ward 4)",
             "Briggs (Ward 5)",
-            "Ramlawi (Ward 5)",
+            "Cornell (Ward 5)",
         ]
     )
     w.writerows(rows)
