@@ -17,7 +17,8 @@ from bs4 import BeautifulSoup
 
 
 class MockTwitterApiClient:
-    TWITTER_URL_LENGTH = 23
+    URL_LENGTH = 23
+    MAX_POST_LENGTH = 279
 
     def __init__(self, creds_file=None):
         pass
@@ -29,13 +30,51 @@ class MockTwitterApiClient:
         logging.info("would send tweet ({}): {}".format(len(message), message))
         return "hi_this_is_a_tweet_id"
 
+class MastodonApiClient:
+    URL_LENGTH = 23
+    MAX_POST_LENGTH = 499
+
+    def __init__(self, creds_filename=None):
+        self.creds_filename = creds_filename or "mastodon_creds.json"
+        with open(self.creds_filename, "r") as fp:
+            creds_dict = json.load(fp)
+        self.bearer_token = creds_dict["access_token"]["access_token"]
+        self.client_id = creds_dict["client_credentials"]["client_id"]
+        self.client_secret = creds_dict["client_credentials"]["client_secret"]
+        self.client = WebApplicationClient(self.client_id)
+        self.instance = creds_dict["instance"]
+
+    def refresh_creds(self):
+        pass
+
+    def send_tweet(self, message, in_reply_to=None):
+        logging.info("Sending Toot: {}".format(message))
+
+        params = {
+            "status": message,
+        }
+        if in_reply_to is not None:
+            params["in_reply_to_id"] = in_reply_to
+
+        r = requests.post(
+            "{}/api/v1/statuses".format(self.instance),
+            data=json.dumps(params),
+            headers={
+                "Authorization": f"Bearer {self.bearer_token}",
+                "Content-Type": "application/json",
+            },
+        ).json()
+
+        # TODO: ERROR HANDLING
+        return r["id"]
 
 class TwitterApiClient:
-    TWITTER_URL_LENGTH = 23
+    URL_LENGTH = 23
+    MAX_POST_LENGTH = 279
 
-    def __init__(self, creds_filename):
-        self.creds_filename = creds_filename
-        with open(creds_filename, "r") as fp:
+    def __init__(self, creds_filename=None):
+        self.creds_filename = creds_filename or "twitter_creds.json"
+        with open(self.creds_filename, "r") as fp:
             creds_dict = json.load(fp)
         self.refresh_token = creds_dict["refresh_token"]
         self.client_id = creds_dict["client_id"]
@@ -296,14 +335,15 @@ def process_event_item(ei, previous_ei, twitter_client):
         suffix += "#a2council"
 
         # the limit should be 280 but I'm gonna just be slightly conservative here...
-        remaining = 279 - len(prefix + suffix)
+        remaining = twitter_client.MAX_POST_LENGTH - len(prefix + suffix)
 
         # if we have a URL for the event item's associated matter, then add it. (Twitter
         # will auto-shorten all URLs to a fixed length, so we need to account for that
         # in our character count)
         legistar_url = ""
         if ei.get("EventItemInSiteURL"):
-            remaining -= (twitter_client.TWITTER_URL_LENGTH + 1)
+            remaining -= (twitter_client.URL_LENGTH
+     + 1)
             legistar_url = "\n" + ei["EventItemInSiteURL"]
         
         # Truncate the title as needed
@@ -339,6 +379,12 @@ def has_meeting_ended(eventitems, start, now):
 
 
 def main():
+    posting_clients = {
+        "twitter": TwitterApiClient,
+        "mastodon": MastodonApiClient,
+        "mock": MockTwitterApiClient
+    }
+
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--event-id", help="event id to query in Legistar")
@@ -350,7 +396,7 @@ def main():
         help="save legistar data in json files for each polling run",
         metavar="PATH",
     )
-    parser.add_argument("--mock", action="store_true", default=False)
+    parser.add_argument("--posting-platform", choices=posting_clients.keys(), default="twitter")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -364,8 +410,8 @@ def main():
     except Exception as e:
         logging.debug("Could not load state file: {}".format(e))
 
-    twitter_client_class = TwitterApiClient if not args.mock else MockTwitterApiClient
-    client = twitter_client_class("twitter_creds.json")
+    twitter_client_class = posting_clients[args.posting_platform]
+    client = twitter_client_class()
 
     # get initial creds *now* to ensure they work
     client.refresh_creds()
