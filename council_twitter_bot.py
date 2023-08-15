@@ -191,7 +191,7 @@ class LegistarMinutesSource:
                     logging.exception("Failed to parse event page HTML")
 
             eventitems = s.get(
-                f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}/eventitems",
+                f"https://webapi.legistar.com/v1/a2gov/events/{self.event_id}/eventitems?MinutesNote=1&AgendaNote=1",
             ).json()
             # "or 0" because sometimes it's None and that throws exceptions
             eventitems = sorted(
@@ -201,6 +201,8 @@ class LegistarMinutesSource:
                 matter_file = item["EventItemMatterFile"]
                 if matter_file:
                     item["EventItemInSiteURL"] = matter_file_to_url.get(matter_file)
+                else:
+                    item["EventItemInSiteURL"] = None
             event["EventItems"] = eventitems
 
             for item in eventitems:
@@ -209,6 +211,13 @@ class LegistarMinutesSource:
                 item["EventItemVoteInfo"] = s.get(
                     f"https://webapi.legistar.com/v1/a2gov/eventitems/{event_item_id}/votes"
                 ).json()
+
+                if item["EventItemRollCallFlag"]:
+                    item["EventItemRollCallInfo"] = s.get(
+                        f"https://webapi.legistar.com/v1/a2gov/eventitems/{event_item_id}/RollCalls"
+                    ).json()
+                else:
+                    item["EventItemRollCallInfo"] = []
 
         logging.info("Polling run complete")
         return event
