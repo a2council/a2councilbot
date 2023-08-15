@@ -315,7 +315,7 @@ def process_event_item(ei, previous_ei, twitter_client):
         action_name = fixup_action_tense(ei["EventItemActionName"])
         suffix = "\nAction: {} ({})\n".format(
             action_name,
-            ei["EventItemMover"].split()[-1],
+            ei["EventItemMover"].split()[-1] if ei["EventItemMover"] else None,
         )
 
         suffix += "Result: {}\n\n".format(ei["EventItemPassedFlagName"])
