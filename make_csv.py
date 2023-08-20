@@ -7,22 +7,75 @@ import sys
 
 import council_twitter_bot
 
+LEGISLATIVE_MATTER_TYPES = set(
+    [
+        "Appointment",
+        # "Introduction",
+        # "Minutes",
+        "Ordinance",
+        # "Proclamation",
+        # "Public Hearing Only",
+        # "Report or Communication ",
+        "Resolution",
+        "Resolution/Public Hearing",
+        # "Work Session",
+    ]
+)
+
+def get_voting_result(ei):
+    """Returns True if the EventItem was "passed", False if it was voted down,
+    or None if it was not voted upon at all"""
+
+    if ei["EventItemPassedFlag"] is not None:
+        return bool(ei["EventItemPassedFlag"])
+    elif ei["EventItemConsent"]:
+        # Generally, Consent Agenda items should have EventItemPassedFlag set to 1,
+        # but it appears that sometimes the clerk forgets to do this. If we're fetching
+        # voting results after a meeting ends, then generally every item with
+        # EventItemConsent set should represent an item that was passed on the consent
+        # agenda.
+        # TODO: If we want to be extra careful, we could find the magic
+        # "Passed On Consent Agenda" EventItem and confirm its outcome.
+        return True
+    elif ei["EventItemActionName"] == "Amended":
+        # An "Amended" action which does not have a voting result typically means it
+        # was a "Friendly" amendment. We should include those.
+        return True
+    return None
+
+
 def get_class(ei):
-    if ei["EventItemAgendaNumber"] is None or ei["EventItemActionName"] is None:
+    voting_result = get_voting_result(ei)
+
+    # Only process items with votes
+    if voting_result is None:
+        return None
+
+    # Only process legislative items
+    matter_type = ei["EventItemMatterType"]
+    if matter_type is None or matter_type not in LEGISLATIVE_MATTER_TYPES:
+        # Note: the "is None" means we'll skip agenda items which don't have any
+        # legislative record attached to them. This includes e.g. approval of agenda,
+        # motions to enter closed session, adjournment, but also possibly some
+        # unusual shenanigans. I believe skipping these items is *usually* what
+        # we want, but maybe not *always*
         return None
 
     event_class_items = []
-    if re.match(r"MC-\d+", ei["EventItemAgendaNumber"]):
+    if matter_type == "Appointment":
         # XXX some MC items are purely informational, others get a vote.
         # until that vote has happened, it's difficult to determine which are which
         event_class_items.append("nomination")
-    elif re.match(r"CA-\d+", ei["EventItemAgendaNumber"]):
+    elif re.match(r"CA-\d+", ei["EventItemAgendaNumber"]) or ei["EventItemConsent"]:
         event_class_items.append("consent")
         if not ei["EventItemConsent"]:
             event_class_items.append("pulled")
-    elif ei["EventItemMatterType"] == "Ordinance":
+    elif matter_type == "Ordinance":
         event_class_items.append("ordinance")
-    elif ei["EventItemMatterType"] == "Resolution":
+    elif matter_type == "Resolution" or matter_type == "Resolution/Public Hearing":
+        # Note: I believe the "Resolution/Public Hearing" matter type only occurs
+        # in e.g. Planning Commission meetings, but still let's account for it
+        # just in case
         event_class_items.append("resolution")
     else:
         # skip this one, it's not interesting
@@ -31,9 +84,12 @@ def get_class(ei):
     if not ei["EventItemActionName"].startswith("Approved"):
         event_class_items.append("amendment")
 
-    if ei["EventItemPassedFlag"] == 1:
+    if voting_result:
         event_class_items.append("pass")
-    elif ei["EventItemPassedFlag"] == 0:
+    else:
+        # Note: not accounting for the "voting_result is None" case here
+        # because we already ruled that out at the top. EventItems that don't
+        # have votes will be filtered out
         event_class_items.append("fail")
 
     return " ".join(event_class_items)
@@ -70,7 +126,9 @@ COUNCILMEMBERS = (
 
 def get_votes(ei):
     # Return a list of empty results if no vote has been taken
-    if ei["EventItemPassedFlag"] is None:
+    voting_result = get_voting_result(ei)
+    if voting_result is None:
+        # XXX this should be unreachable
         return ["" for cm in COUNCILMEMBERS]
 
     votes = {}
@@ -84,7 +142,7 @@ def get_votes(ei):
             )
 
     # basically, for voice votes, we assume it was unanimous
-    default_vote = "TRUE" if ei["EventItemPassedFlag"] else "FALSE"
+    default_vote = "TRUE" if voting_result else "FALSE"
     return [votes.get(cm, default_vote) for cm in COUNCILMEMBERS]
 
 
