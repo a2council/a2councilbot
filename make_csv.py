@@ -22,6 +22,7 @@ LEGISLATIVE_MATTER_TYPES = set(
     ]
 )
 
+
 def get_voting_result(ei):
     """Returns True if the EventItem was "passed", False if it was voted down,
     or None if it was not voted upon at all"""
@@ -124,7 +125,7 @@ COUNCILMEMBERS = (
 )
 
 
-def get_votes(ei):
+def get_votes(ei, absent_members):
     # Return a list of empty results if no vote has been taken
     voting_result = get_voting_result(ei)
     if voting_result is None:
@@ -141,9 +142,19 @@ def get_votes(ei):
                 vi["VoteValueName"], vi["VoteValueName"]
             )
 
-    # basically, for voice votes, we assume it was unanimous
-    default_vote = "TRUE" if voting_result else "FALSE"
-    return [votes.get(cm, default_vote) for cm in COUNCILMEMBERS]
+    vote_cols = []
+    for cm in COUNCILMEMBERS:
+        # for roll-call votes, just go with what we got
+        vote = votes.get(cm)
+
+        # for voice votes, we assume it was unanimous
+        if vote is None:
+            if cm in absent_members:
+                vote = "Absent"
+            else:
+                vote = "TRUE" if voting_result else "FALSE"
+        vote_cols.append(vote)
+    return vote_cols
 
 
 def main():
@@ -169,7 +180,15 @@ def main():
 
     # Make the CSV
     rows = []
+    absent_members = set()
     for ei in minutes["EventItems"]:
+        if ei["EventItemRollCallFlag"]:
+            absent_members.clear()
+            for rc in ei["EventItemRollCallInfo"]:
+                if rc["RollCallValueName"] == "Absent":
+                    lastname = rc["RollCallPersonName"].split()[-1]
+                    absent_members.add(lastname)
+
         event_class = get_class(ei)
         if event_class is None:
             # XXX we're using this as our signal that we should skip this eventitem
@@ -182,7 +201,7 @@ def main():
             get_display_agenda_number(ei),
             ei["EventItemTitle"],
         ]
-        cols += get_votes(ei)
+        cols += get_votes(ei, absent_members)
         rows.append(cols)
 
     w = csv.writer(sys.stdout)
