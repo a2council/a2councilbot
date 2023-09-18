@@ -11,7 +11,7 @@
 
         devShell = pkgs.mkShell {
             buildInputs = with pkgs; [
-                python3Packages.poetry
+                python3Packages.poetry-core
                 python3Packages.requests
                 python3Packages.pytz
                 python3Packages.oauthlib
