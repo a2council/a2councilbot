@@ -4,6 +4,7 @@ import logging
 import json
 import re
 import sys
+from types import NoneType
 
 import council_twitter_bot
 
@@ -82,8 +83,8 @@ def get_class(ei):
         # skip this one, it's not interesting
         return None
 
-    if not ei["EventItemActionName"].startswith("Approved"):
-        event_class_items.append("amendment")
+    if ei["EventItemActionName"] is not None and not ei["EventItemActionName"].startswith("Approved"):
+            event_class_items.append("amendment")
 
     if voting_result:
         event_class_items.append("pass")
