@@ -71,7 +71,7 @@ def get_class(ei):
     elif re.match(r"CA-\d+", ei["EventItemAgendaNumber"]) or ei["EventItemConsent"]:
         event_class_items.append("consent")
         if not ei["EventItemConsent"]:
-            event_class_items.append("pulled")
+            event_class_items.append("rollcall")
     elif matter_type == "Ordinance":
         event_class_items.append("ordinance")
     elif matter_type == "Resolution" or matter_type == "Resolution/Public Hearing":
