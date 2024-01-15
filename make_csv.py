@@ -68,7 +68,10 @@ def get_class(ei):
         # XXX some MC items are purely informational, others get a vote.
         # until that vote has happened, it's difficult to determine which are which
         event_class_items.append("nomination")
-    elif re.match(r"CA-\d+", ei["EventItemAgendaNumber"]) or ei["EventItemConsent"]:
+    elif (
+        ei["EventItemAgendaNumber"] is not None
+        and re.match(r"CA-\d+", ei["EventItemAgendaNumber"])
+    ) or ei["EventItemConsent"]:
         event_class_items.append("consent")
         if not ei["EventItemConsent"]:
             event_class_items.append("rollcall")
@@ -83,8 +86,10 @@ def get_class(ei):
         # skip this one, it's not interesting
         return None
 
-    if ei["EventItemActionName"] is not None and not ei["EventItemActionName"].startswith("Approved"):
-            event_class_items.append("amendment")
+    if ei["EventItemActionName"] is not None and not ei[
+        "EventItemActionName"
+    ].startswith("Approved"):
+        event_class_items.append("amendment")
 
     if voting_result:
         event_class_items.append("pass")

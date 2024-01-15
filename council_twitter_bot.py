@@ -381,7 +381,7 @@ def has_meeting_ended(eventitems, start, now):
             return True
 
     # failsafe - assume the meeting has ended if 12h have elapsed!
-    if now > (start + datetime.timedelta(12)):
+    if now > (start + datetime.timedelta(hours=12)):
         return True
 
     return False
