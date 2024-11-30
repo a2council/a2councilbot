@@ -1,4 +1,5 @@
 import argparse
+import base64
 import datetime
 from datetime import timezone
 import glob
@@ -15,6 +16,13 @@ import subprocess
 import pytz
 from oauthlib.oauth2 import WebApplicationClient
 from bs4 import BeautifulSoup
+
+
+def truncate(text, length):
+    if len(text) > length:
+        return text[: length - 3] + "..."
+    else:
+        return text
 
 
 class MockTwitterApiClient:
@@ -44,6 +52,111 @@ class MockTwitterApiClient:
             )
         )
         return "hi_this_is_a_tweet_id"
+
+
+class BskyApiClient:
+    # Unlike Twitter and Mastodon, the URL_LENGTH is really up to us
+    # rather than an immutable constant for the platform
+    URL_LENGTH = 34
+    MAX_POST_LENGTH = 300
+
+    def __init__(self, creds_filename=None):
+        self.creds_filename = creds_filename or "bsky_creds.json"
+        with open(self.creds_filename, "r") as fp:
+            creds_dict = json.load(fp)
+        self.pds_url = creds_dict["pds_url"]
+        self.handle = creds_dict["handle"]
+        self.app_password = creds_dict["app_password"]
+        self.session = None
+        self.access_jwt_expire = 0
+
+    def refresh_creds(self):
+        if self.session is None:
+            resp = requests.post(
+                self.pds_url + "/xrpc/com.atproto.server.createSession",
+                json={"identifier": self.handle, "password": self.app_password},
+            )
+            resp.raise_for_status()
+            self.session = resp.json()
+        else:
+            resp = requests.post(
+                self.pds_url + "/xrpc/com.atproto.server.refreshSession",
+                headers={"Authorization": "Bearer " + self.session["refreshJwt"]}
+            )
+            resp.raise_for_status()
+            self.session = resp.json()
+
+        access_jwt_content_encoded = self.session["accessJwt"].split(".")[1]
+        access_jwt_content_json = base64.b64decode(access_jwt_content_encoded)
+        access_jwt_content = json.loads(access_jwt_content_json)
+        self.access_jwt_expire = access_jwt_content["exp"]
+
+    def send_tweet(self, message: str, in_reply_to=None):
+        if time.time() > self.access_jwt_expire:
+            self.refresh_creds()
+
+        # find a the URL in the message so we can shorten and linkify it
+        # XXX should probably refactor this so "message" contains a structured
+        # XXX representation of text and URLs rather than having to do this re-parsing
+        # XXX also we could maybe support more than one URL :)
+        match: re.Match = re.search(r"[$|\s](https?:\/\/)([\S]+)", message)
+        facets = []
+        if match is not None:
+            prefix = message[: match.start(1)]
+            shortened_url = truncate(match.group(2), self.URL_LENGTH)
+            suffix = message[match.end(2):]
+            message = prefix + shortened_url + suffix
+
+            # facet needs to be byte-indexed rather than glyph-indexed
+            # (which is a very weird choice, ATProto devs, but okay I guess...)
+            byte_start = len(prefix.encode("utf-8"))
+            byte_end = byte_start + len(shortened_url.encode("utf-8"))
+            facets.append(
+                {
+                    "index": {
+                        "byteStart": byte_start,
+                        "byteEnd": byte_end,
+                    },
+                    "features": [
+                        {
+                            "$type": "app.bsky.richtext.facet#link",
+                            "uri": match.group(1) + match.group(2),
+                        }
+                    ],
+                }
+            )
+
+        # trailing "Z" is preferred over "+00:00"
+        now = datetime.datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        post = {
+            "$type": "app.bsky.feed.post",
+            "text": message,
+            "createdAt": now,
+            "facets": facets,
+        }
+        if in_reply_to is not None:
+            post["reply"] = in_reply_to
+
+        resp = requests.post(
+            self.pds_url + "/xrpc/com.atproto.repo.createRecord",
+            headers={"Authorization": "Bearer " + self.session["accessJwt"]},
+            json={
+                "repo": self.session["did"],
+                "collection": "app.bsky.feed.post",
+                "record": post,
+            },
+        ).json()  # XXX ERROR HANDLING?
+
+        new_reply_info = {
+            "parent": {"uri": resp["uri"], "cid": resp["cid"]},
+        }
+        new_reply_info["root"] = (
+            new_reply_info["parent"] if in_reply_to is None else in_reply_to["root"]
+        )
+
+        return new_reply_info
+
 
 class MastodonApiClient:
     URL_LENGTH = 23
@@ -82,6 +195,7 @@ class MastodonApiClient:
 
         # TODO: ERROR HANDLING
         return r["id"]
+
 
 class TwitterApiClient:
     URL_LENGTH = 23
@@ -414,14 +528,12 @@ def process_event_item(ei, previous_ei, twitter_client):
         # in our character count)
         legistar_url = ""
         if ei.get("EventItemInSiteURL"):
-            remaining -= (twitter_client.URL_LENGTH
-     + 1)
+            remaining -= twitter_client.URL_LENGTH + 1
             legistar_url = "\n" + ei["EventItemInSiteURL"]
-        
+
         # Truncate the title as needed
         title = ei["EventItemTitle"]
-        if len(title) >= remaining:
-            title = title[: remaining - 3] + "..."
+        title = truncate(title, remaining)
 
         # put it all together
         output = prefix + title + legistar_url + suffix
@@ -454,7 +566,8 @@ def main():
     posting_clients = {
         "twitter": TwitterApiClient,
         "mastodon": MastodonApiClient,
-        "mock": MockTwitterApiClient
+        "mock": MockTwitterApiClient,
+        "bsky": BskyApiClient
     }
 
     parser = argparse.ArgumentParser()
@@ -471,7 +584,9 @@ def main():
         help="save legistar data in json files for each polling run",
         metavar="PATH",
     )
-    parser.add_argument("--posting-platform", choices=posting_clients.keys(), default="twitter")
+    parser.add_argument(
+        "--posting-platform", choices=posting_clients.keys(), default="twitter"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
