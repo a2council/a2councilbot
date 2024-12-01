@@ -42,6 +42,7 @@ class SocialMediaPostComponent:
 class SocialMediaPost:
     COMPONENT_TYPE_TEXT = 0
     COMPONENT_TYPE_URL = 1
+    COMPONENT_TYPE_HASHTAG = 2
 
     def __init__(self):
         self.components: list[SocialMediaPostComponent] = []
@@ -54,6 +55,11 @@ class SocialMediaPost:
     def add_url(self, text: str):
         self.components.append(
             SocialMediaPostComponent(self.COMPONENT_TYPE_URL, text, False)
+        )
+
+    def add_hashtag(self, text: str):
+        self.components.append(
+            SocialMediaPostComponent(self.COMPONENT_TYPE_HASHTAG, text, False)
         )
 
     def get_post_length(self, url_length: int) -> int:
@@ -70,6 +76,7 @@ class SocialMediaPost:
         url_length: int,
         max_post_length: int,
         url_callback: Callable[[str, str], str] = lambda prefix, url: url,
+        hashtag_callback: Callable[[str, str], str] = lambda prefix, hashtag: hashtag,
     ) -> str:
         proposed_length = self.get_post_length(url_length)
         post_text = ""
@@ -92,6 +99,8 @@ class SocialMediaPost:
                     post_text += c.text
             elif c.component_type == self.COMPONENT_TYPE_URL:
                 post_text += url_callback(post_text, c.text)
+            elif c.component_type == self.COMPONENT_TYPE_HASHTAG:
+                post_text += hashtag_callback(post_text, c.text)
 
         if proposed_length > max_post_length:
             raise RuntimeError("Post is too long!")
@@ -201,8 +210,29 @@ class BskyApiClient:
 
             return shortened_url
 
+        def handle_hashtag(prefix: str, hashtag: str):
+            byte_start = len(prefix.encode("utf-8"))
+            byte_end = byte_start + len(hashtag.encode("utf-8"))
+
+            facets.append(
+                {
+                    "index": {
+                        "byteStart": byte_start,
+                        "byteEnd": byte_end,
+                    },
+                    "features": [
+                        {
+                            "$type": "app.bsky.richtext.facet#tag",
+                             # strip off the leading "#"
+                            "tag": hashtag[1:] if hashtag.startswith("#") else hashtag,
+                        }
+                    ],
+                }
+            )
+            return hashtag
+
         post_text = message.get_plaintext_post(
-            self.URL_LENGTH, self.MAX_POST_LENGTH, handle_url
+            self.URL_LENGTH, self.MAX_POST_LENGTH, handle_url, handle_hashtag
         )
 
         # trailing "Z" is preferred over "+00:00"
@@ -610,8 +640,8 @@ def process_event_item(ei: dict, previous_ei: dict) -> SocialMediaPost:
         else:
             suffix += "Voice vote\n"
 
-        suffix += "#a2council"
         post.add_text(suffix)
+        post.add_hashtag("#a2council")
 
         return post
     else:
@@ -760,8 +790,9 @@ def main():
             # start the twitter thread
             if not state["previous_post_ids"]:
                 message = SocialMediaPost()
+                message.add_hashtag("#a2council")
                 message.add_text(
-                    "#a2council voting results thread for {}...\n\n\U0001F9F5".format(
+                    " voting results thread for {}...\n\n\U0001F9F5".format(
                         event["EventDate"].split("T")[0]
                     ),
                     False,
