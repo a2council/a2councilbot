@@ -6,6 +6,7 @@ import glob
 import logging
 import pathlib
 import re
+from typing import Callable, Optional
 import requests
 from urllib.parse import urlparse
 import json
@@ -18,11 +19,83 @@ from oauthlib.oauth2 import WebApplicationClient
 from bs4 import BeautifulSoup
 
 
-def truncate(text, length):
+def truncate(text: str, length: int) -> str:
+    if length < 0:
+        raise ValueError("bad length")
+
     if len(text) > length:
-        return text[: length - 3] + "..."
+        if length < 3:
+            return "." * length
+        else:
+            return text[: length - 3] + "..."
     else:
         return text
+
+
+class SocialMediaPostComponent:
+    def __init__(self, component_type: int, text: str, truncate: bool = False):
+        self.component_type = component_type
+        self.text = text
+        self.truncate = truncate
+
+
+class SocialMediaPost:
+    COMPONENT_TYPE_TEXT = 0
+    COMPONENT_TYPE_URL = 1
+
+    def __init__(self):
+        self.components: list[SocialMediaPostComponent] = []
+
+    def add_text(self, text: str, truncate: bool = False):
+        self.components.append(
+            SocialMediaPostComponent(self.COMPONENT_TYPE_TEXT, text, truncate)
+        )
+
+    def add_url(self, text: str):
+        self.components.append(
+            SocialMediaPostComponent(self.COMPONENT_TYPE_URL, text, False)
+        )
+
+    def get_post_length(self, url_length: int) -> int:
+        length = 0
+        for c in self.components:
+            if c.component_type == self.COMPONENT_TYPE_URL:
+                length += url_length
+            else:
+                length += len(c.text)
+        return length
+
+    def get_plaintext_post(
+        self,
+        url_length: int,
+        max_post_length: int,
+        url_callback: Callable[[str, str], str] = lambda prefix, url: url,
+    ) -> str:
+        proposed_length = self.get_post_length(url_length)
+        post_text = ""
+
+        for c in self.components:
+            if c.component_type == self.COMPONENT_TYPE_TEXT:
+                # this code is written to generally assume only one component will be truncated.
+                # it should in theory truncate multiple components if asked to do so, but the first
+                # will be entirely deleted before it will consider truncating a second...
+                if c.truncate and proposed_length > max_post_length:
+                    component_length = len(c.text)
+                    target_length = component_length - (
+                        proposed_length - max_post_length
+                    )
+                    if target_length < 0:
+                        target_length = 0
+                    proposed_length -= component_length - target_length
+                    post_text += truncate(c.text, target_length)
+                else:
+                    post_text += c.text
+            elif c.component_type == self.COMPONENT_TYPE_URL:
+                post_text += url_callback(post_text, c.text)
+
+        if proposed_length > max_post_length:
+            raise RuntimeError("Post is too long!")
+        return post_text
 
 
 class MockTwitterApiClient:
@@ -51,7 +124,10 @@ class MockTwitterApiClient:
                 len(post_text), twitter_calculated_len, post_text
             )
         )
-        return "hi_this_is_a_tweet_id"
+        if in_reply_to is not None:
+            parts = in_reply_to.split()
+            return '{} {}'.format(parts[0], int(parts[1]) + 1)
+        return "hi_this_is_a_tweet_id 0"
 
 
 class BskyApiClient:
@@ -81,7 +157,7 @@ class BskyApiClient:
         else:
             resp = requests.post(
                 self.pds_url + "/xrpc/com.atproto.server.refreshSession",
-                headers={"Authorization": "Bearer " + self.session["refreshJwt"]}
+                headers={"Authorization": "Bearer " + self.session["refreshJwt"]},
             )
             resp.raise_for_status()
             self.session = resp.json()
@@ -89,28 +165,25 @@ class BskyApiClient:
         access_jwt_content_encoded = self.session["accessJwt"].split(".")[1]
         access_jwt_content_json = base64.b64decode(access_jwt_content_encoded)
         access_jwt_content = json.loads(access_jwt_content_json)
-        self.access_jwt_expire = access_jwt_content["exp"]
+        self.access_jwt_expire = access_jwt_content["exp"] - 60
 
-    def send_tweet(self, message: str, in_reply_to=None):
+    def send_tweet(self, message: SocialMediaPost, in_reply_to=None):
         if time.time() > self.access_jwt_expire:
             self.refresh_creds()
 
-        # find a the URL in the message so we can shorten and linkify it
-        # XXX should probably refactor this so "message" contains a structured
-        # XXX representation of text and URLs rather than having to do this re-parsing
-        # XXX also we could maybe support more than one URL :)
-        match: re.Match = re.search(r"[$|\s](https?:\/\/)([\S]+)", message)
         facets = []
-        if match is not None:
-            prefix = message[: match.start(1)]
-            shortened_url = truncate(match.group(2), self.URL_LENGTH)
-            suffix = message[match.end(2):]
-            message = prefix + shortened_url + suffix
 
-            # facet needs to be byte-indexed rather than glyph-indexed
-            # (which is a very weird choice, ATProto devs, but okay I guess...)
+        def handle_url(prefix: str, url: str):
+            match = re.match(r"^(https?:\/\/)([\S]+)$", url)
+            if match is None:
+                logging.warning("Bad URL: {}".format(url))
+                shortened_url = truncate(url, self.URL_LENGTH)
+            else:
+                shortened_url = truncate(match.group(2), self.URL_LENGTH)
+
             byte_start = len(prefix.encode("utf-8"))
             byte_end = byte_start + len(shortened_url.encode("utf-8"))
+
             facets.append(
                 {
                     "index": {
@@ -126,12 +199,18 @@ class BskyApiClient:
                 }
             )
 
+            return shortened_url
+
+        post_text = message.get_plaintext_post(
+            self.URL_LENGTH, self.MAX_POST_LENGTH, handle_url
+        )
+
         # trailing "Z" is preferred over "+00:00"
         now = datetime.datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         post = {
             "$type": "app.bsky.feed.post",
-            "text": message,
+            "text": post_text,
             "createdAt": now,
             "facets": facets,
         }
@@ -176,10 +255,11 @@ class MastodonApiClient:
         pass
 
     def send_tweet(self, message, in_reply_to=None):
-        logging.info("Sending Toot: {}".format(message))
+        post_text = message.get_plaintext_post(self.URL_LENGTH, self.MAX_POST_LENGTH)
+        logging.info("Sending Toot: {}".format(post_text))
 
         params = {
-            "status": message,
+            "status": post_text,
         }
         if in_reply_to is not None:
             params["in_reply_to_id"] = in_reply_to
@@ -239,13 +319,14 @@ class TwitterApiClient:
         pass
 
     def send_tweet(self, message, in_reply_to=None):
-        logging.info("Sending Tweet: {}".format(message))
+        post_text = message.get_plaintext_post(self.URL_LENGTH, self.MAX_POST_LENGTH)
+        logging.info("Sending Tweet: {}".format(post_text))
 
         if time.time() > self.bearer_token_expire:
             self.refresh_creds()
 
         params = {
-            "text": message,
+            "text": post_text,
         }
         if in_reply_to is not None:
             params["reply"] = {"in_reply_to_tweet_id": in_reply_to}
@@ -483,7 +564,7 @@ def fixup_minutes(eventitems):
                 )
 
 
-def process_event_item(ei, previous_ei, twitter_client):
+def process_event_item(ei: dict, previous_ei: dict) -> SocialMediaPost:
     if (
         ei["EventItemPassedFlag"] is not None
         and (previous_ei is None or previous_ei["EventItemPassedFlag"] is None)
@@ -493,11 +574,22 @@ def process_event_item(ei, previous_ei, twitter_client):
         )
         and ei["EventItemTitle"].lower() != "passed on consent agenda"
     ):
-        if ei["EventItemAgendaNumber"] is not None:
-            prefix = "{}: ".format(ei["EventItemAgendaNumber"])
-        else:
-            prefix = ""
+        post = SocialMediaPost()
 
+        # Agenda number
+        if ei["EventItemAgendaNumber"] is not None:
+            post.add_text("{}: ".format(ei["EventItemAgendaNumber"]))
+
+        # title (truncate to fit)
+        post.add_text(ei["EventItemTitle"], True)
+
+        # url if present
+        legistar_url = ei.get("EventItemInSiteURL")
+        if legistar_url:
+            post.add_text("\n")
+            post.add_url(legistar_url)
+
+        # everything else
         action_name = fixup_action_tense(ei["EventItemActionName"])
         suffix = "\nAction: {} ({})\n".format(
             action_name,
@@ -519,25 +611,9 @@ def process_event_item(ei, previous_ei, twitter_client):
             suffix += "Voice vote\n"
 
         suffix += "#a2council"
+        post.add_text(suffix)
 
-        # the limit should be 280 but I'm gonna just be slightly conservative here...
-        remaining = twitter_client.MAX_POST_LENGTH - len(prefix + suffix)
-
-        # if we have a URL for the event item's associated matter, then add it. (Twitter
-        # will auto-shorten all URLs to a fixed length, so we need to account for that
-        # in our character count)
-        legistar_url = ""
-        if ei.get("EventItemInSiteURL"):
-            remaining -= twitter_client.URL_LENGTH + 1
-            legistar_url = "\n" + ei["EventItemInSiteURL"]
-
-        # Truncate the title as needed
-        title = ei["EventItemTitle"]
-        title = truncate(title, remaining)
-
-        # put it all together
-        output = prefix + title + legistar_url + suffix
-        return output
+        return post
     else:
         return None
 
@@ -562,12 +638,28 @@ def has_meeting_ended(eventitems, start, now):
     return False
 
 
+def send_posts(
+    message: SocialMediaPost,
+    posting_clients: dict[str, object],
+    previous_post_ids: Optional[dict] = None,
+) -> dict:
+    if previous_post_ids is None:
+        previous_post_ids = {}
+    new_previous_post_ids = {}
+    for platform_name, client in posting_clients.items():
+        previous_post_id = previous_post_ids.get(platform_name)
+        new_previous_post_ids[platform_name] = client.send_tweet(
+            message, previous_post_id
+        )
+    return new_previous_post_ids
+
+
 def main():
-    posting_clients = {
+    POSTING_CLIENT_CLASSES = {
         "twitter": TwitterApiClient,
         "mastodon": MastodonApiClient,
         "mock": MockTwitterApiClient,
-        "bsky": BskyApiClient
+        "bsky": BskyApiClient,
     }
 
     parser = argparse.ArgumentParser()
@@ -585,7 +677,10 @@ def main():
         metavar="PATH",
     )
     parser.add_argument(
-        "--posting-platform", choices=posting_clients.keys(), default="twitter"
+        "--posting-platforms",
+        choices=POSTING_CLIENT_CLASSES.keys(),
+        nargs="+",
+        required=True,
     )
     args = parser.parse_args()
 
@@ -593,18 +688,19 @@ def main():
         level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
-    state = {"event_id": None, "known_event_items": {}, "last_tweet_id": None}
+    state = {"event_id": None, "known_event_items": {}, "previous_post_ids": None}
     try:
         with open("state.json", "r") as fp:
             state = json.load(fp)
     except Exception as e:
         logging.debug("Could not load state file: {}".format(e))
 
-    twitter_client_class = posting_clients[args.posting_platform]
-    client = twitter_client_class()
-
-    # get initial creds *now* to ensure they work
-    client.refresh_creds()
+    posting_clients = {}
+    for platform in args.posting_platforms:
+        instance = POSTING_CLIENT_CLASSES[platform]()
+        # get initial creds *now* to ensure they work
+        instance.refresh_creds()
+        posting_clients[platform] = instance
 
     if args.event_id is not None:
         minutes_source = LegistarMinutesSource(args.event_id)
@@ -654,7 +750,7 @@ def main():
                 state = {
                     "event_id": None,
                     "known_event_items": {},
-                    "last_tweet_id": None,
+                    "previous_post_ids": None,
                 }
 
             # store current event id
@@ -662,22 +758,25 @@ def main():
                 state["event_id"] = event["EventId"]
 
             # start the twitter thread
-            if not state["last_tweet_id"]:
-                state["last_tweet_id"] = client.send_tweet(
+            if not state["previous_post_ids"]:
+                message = SocialMediaPost()
+                message.add_text(
                     "#a2council voting results thread for {}...\n\n\U0001F9F5".format(
                         event["EventDate"].split("T")[0]
-                    )
+                    ),
+                    False,
                 )
+                state["previous_post_ids"] = send_posts(message, posting_clients)
 
             eventitems = event["EventItems"]
             fixup_minutes(eventitems)
             for ei in eventitems:
                 guid = ei["EventItemGuid"]
                 previous_ei = state["known_event_items"].get(guid)
-                output = process_event_item(ei, previous_ei, client)
+                output = process_event_item(ei, previous_ei)
                 if output:
-                    state["last_tweet_id"] = client.send_tweet(
-                        output, state["last_tweet_id"]
+                    state["previous_post_ids"] = send_posts(
+                        output, posting_clients, state["previous_post_ids"]
                     )
                 state["known_event_items"][guid] = ei
         except Exception:
