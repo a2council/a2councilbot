@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import json
 import time
 import sys
+import subprocess
 
 import pytz
 from oauthlib.oauth2 import WebApplicationClient
@@ -26,8 +27,22 @@ class MockTwitterApiClient:
     def refresh_creds(self):
         pass
 
-    def send_tweet(self, message, in_reply_to=None):
-        logging.info("would send tweet ({}): {}".format(len(message), message))
+    def send_tweet(self, message: SocialMediaPost, in_reply_to=None):
+        post_text = message.get_plaintext_post(self.URL_LENGTH, self.MAX_POST_LENGTH)
+
+        # sanity check to confirm we're truncating things to the correct length
+        match = re.search(r"(^|\s)(https?:\/\/[\S]+)", post_text)
+        if match is not None:
+            twitter_calculated_len = (
+                match.start(2) + self.URL_LENGTH + (len(post_text) - match.end(2))
+            )
+        else:
+            twitter_calculated_len = len(post_text)
+        logging.info(
+            "would send tweet ({}, {}): {}".format(
+                len(post_text), twitter_calculated_len, post_text
+            )
+        )
         return "hi_this_is_a_tweet_id"
 
 class MastodonApiClient:
@@ -253,12 +268,60 @@ class MockMinutesSource:
 
     def get_minutes(self):
         logging.info(
-            "Starting new mock polling run at {}...".format(self.get_current_time())
+            "Starting new mock polling run at {}...".format(
+                self.get_current_time().astimezone()
+            )
         )
         if self._idx >= len(self.files):
             return self.MEETING_OVER
         with open(self.files[self._idx], "r") as fp:
             return json.load(fp)
+
+
+class MockGitMinutesSource:
+    MEETING_OVER = object()
+
+    def __init__(self, filename):
+        self.filepath = pathlib.Path(filename).resolve()
+        git_log = subprocess.check_output(
+            ["git", "log", "--pretty=%H %ad", "--date=iso8601", self.filepath.name],
+            cwd=self.filepath.parent,
+        )
+        self.commits = []
+        for line in git_log.splitlines():
+            commit_hash, datestring = line.split(None, 1)
+            self.commits.insert(0, (commit_hash.decode(), datestring.decode()))
+        self._idx = 0
+
+    def get_current_time(self):
+        datestring = self.commits[self._idx][1]
+        dt = datetime.datetime.strptime(datestring.strip(), "%Y-%m-%d %H:%M:%S %z")
+        return dt
+
+    def wait(self, seconds):
+        now = self.get_current_time()
+        while self.get_current_time() < (now + datetime.timedelta(seconds=seconds)):
+            if self._idx >= len(self.commits):
+                return
+            self._idx += 1
+
+    def get_minutes(self):
+        logging.info(
+            "Starting new mock polling run at {}...".format(
+                self.get_current_time().astimezone()
+            )
+        )
+        if self._idx >= len(self.commits):
+            return self.MEETING_OVER
+        output = subprocess.check_output(
+            [
+                "git",
+                "show",
+                "{}:{}".format(self.commits[self._idx][0], self.filepath.name),
+            ],
+            cwd=self.filepath.parent,
+        )
+        return json.loads(output)
 
 
 ACTION_TENSE_MAP = {
@@ -400,6 +463,9 @@ def main():
     group.add_argument(
         "--event-file-pattern", help="run parser against stored json files"
     )
+    group.add_argument(
+        "--event-git-repo-file", help="run parser against a json file in a git repo"
+    )
     parser.add_argument(
         "--save-snapshots-in-dir",
         help="save legistar data in json files for each polling run",
@@ -427,8 +493,10 @@ def main():
 
     if args.event_id is not None:
         minutes_source = LegistarMinutesSource(args.event_id)
-    else:
+    elif args.event_file_pattern is not None:
         minutes_source = MockMinutesSource(args.event_file_pattern)
+    else:
+        minutes_source = MockGitMinutesSource(args.event_git_repo_file)
 
     while True:
         event = None
