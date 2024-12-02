@@ -768,7 +768,10 @@ def main():
                     now, meeting_start_time
                 )
             )
-            minutes_source.wait(60)
+            if (meeting_start_time - now) > datetime.timedelta(minutes=15):
+                minutes_source.wait(60*15)
+            else:
+                minutes_source.wait(60)
             continue
 
         try:
