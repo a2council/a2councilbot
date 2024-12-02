@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import pathlib
+import string
 import subprocess
 import os
 
@@ -13,6 +14,7 @@ import council_twitter_bot
 def get_date_string_from_file(file):
     date_string = file.name.rsplit(".", 1)[0][-15:]
     return date_string
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -40,10 +42,13 @@ def main():
             event = json.load(infp)
 
         meeting_start = council_twitter_bot.get_meeting_start(event)
+        body_name_filtered = "".join(
+            c for c in event["EventBodyName"] if c in string.ascii_letters
+        )
 
-        # meeting-{date}-{id}
-        git_repo_filename = "meeting-{}-{}.json".format(
-            meeting_start.strftime("%Y%m%d"), event["EventId"]
+        # {bodyname}-{datetime *in America/Detroit timezone*}-{id}
+        git_repo_filename = "{}-{}-{}.json".format(
+            body_name_filtered, meeting_start.strftime("%Y%m%dT%H%M"), event["EventId"]
         )
         with open(git_repo_dir / git_repo_filename, "w") as outfp:
             json.dump(event, outfp, indent=4, sort_keys=True)
