@@ -4,8 +4,10 @@ import datetime
 from datetime import timezone
 import glob
 import logging
+import os
 import pathlib
 import re
+import string
 from typing import Callable, Optional
 import requests
 from urllib.parse import urlparse
@@ -135,7 +137,7 @@ class MockTwitterApiClient:
         )
         if in_reply_to is not None:
             parts = in_reply_to.split()
-            return '{} {}'.format(parts[0], int(parts[1]) + 1)
+            return "{} {}".format(parts[0], int(parts[1]) + 1)
         return "hi_this_is_a_tweet_id 0"
 
 
@@ -223,7 +225,7 @@ class BskyApiClient:
                     "features": [
                         {
                             "$type": "app.bsky.richtext.facet#tag",
-                             # strip off the leading "#"
+                            # strip off the leading "#"
                             "tag": hashtag[1:] if hashtag.startswith("#") else hashtag,
                         }
                     ],
@@ -684,6 +686,42 @@ def send_posts(
     return new_previous_post_ids
 
 
+def save_snapshot_in_git_repo(git_repo_dir, event, now):
+    meeting_start_time = get_meeting_start(event)
+    git_repo_dir = pathlib.Path(git_repo_dir)
+    body_name_filtered = "".join(
+        c for c in event["EventBodyName"] if c in string.ascii_letters
+    )
+
+    # {bodyname}-{datetime *in America/Detroit timezone*}-{id}
+    git_repo_filename = "{}-{}-{}.json".format(
+        body_name_filtered, meeting_start_time.strftime("%Y%m%dT%H%M"), event["EventId"]
+    )
+    with open(git_repo_dir / git_repo_filename, "w") as outfp:
+        json.dump(event, outfp, indent=4, sort_keys=True)
+
+    subprocess.run(
+        ["git", "add", git_repo_filename], cwd=git_repo_dir, capture_output=True
+    )
+
+    git_env = os.environ.copy()
+    git_env.update(
+        {"GIT_AUTHOR_DATE": now.isoformat(), "GIT_COMMITTER_DATE": now.isoformat()}
+    )
+    r = subprocess.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            "Meeting update at {}".format(now.isoformat()),
+        ],
+        cwd=git_repo_dir,
+        env=git_env,
+        capture_output=True,
+    )
+    logging.debug("'git commit' result: %s", r.stdout)
+
+
 def main():
     POSTING_CLIENT_CLASSES = {
         "twitter": TwitterApiClient,
@@ -701,9 +739,15 @@ def main():
     group.add_argument(
         "--event-git-repo-file", help="run parser against a json file in a git repo"
     )
-    parser.add_argument(
+    snapshot_group = parser.add_mutually_exclusive_group()
+    snapshot_group.add_argument(
         "--save-snapshots-in-dir",
         help="save legistar data in json files for each polling run",
+        metavar="PATH",
+    )
+    snapshot_group.add_argument(
+        "--save-snapshots-in-git-repo",
+        help="save legistar data in json files in a git repo each polling run",
         metavar="PATH",
     )
     parser.add_argument(
@@ -751,6 +795,8 @@ def main():
             continue
 
         now = minutes_source.get_current_time()
+        meeting_start_time = get_meeting_start(event)
+
         if args.save_snapshots_in_dir is not None:
             snapshot_path = pathlib.Path(
                 args.save_snapshots_in_dir,
@@ -760,8 +806,11 @@ def main():
             )
             with open(snapshot_path, "w") as fp:
                 json.dump(event, fp)
+        elif args.save_snapshots_in_git_repo is not None:
+            save_snapshot_in_git_repo(
+                args.save_snapshots_in_git_repo, event, now
+            )
 
-        meeting_start_time = get_meeting_start(event)
         if now < meeting_start_time:
             logging.info(
                 "Meeting hasn't started yet - now {}, start {}".format(
@@ -769,7 +818,7 @@ def main():
                 )
             )
             if (meeting_start_time - now) > datetime.timedelta(minutes=15):
-                minutes_source.wait(60*15)
+                minutes_source.wait(60 * 15)
             else:
                 minutes_source.wait(60)
             continue

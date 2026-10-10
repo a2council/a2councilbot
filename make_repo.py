@@ -41,33 +41,8 @@ def main():
         with open(current_file, "r") as infp:
             event = json.load(infp)
 
-        meeting_start = council_twitter_bot.get_meeting_start(event)
-        body_name_filtered = "".join(
-            c for c in event["EventBodyName"] if c in string.ascii_letters
-        )
-
-        # {bodyname}-{datetime *in America/Detroit timezone*}-{id}
-        git_repo_filename = "{}-{}-{}.json".format(
-            body_name_filtered, meeting_start.strftime("%Y%m%dT%H%M"), event["EventId"]
-        )
-        with open(git_repo_dir / git_repo_filename, "w") as outfp:
-            json.dump(event, outfp, indent=4, sort_keys=True)
-
-        subprocess.run(["git", "add", git_repo_filename], cwd=git_repo_dir)
-
-        git_env = os.environ.copy()
-        git_env.update(
-            {"GIT_AUTHOR_DATE": dt.isoformat(), "GIT_COMMITTER_DATE": dt.isoformat()}
-        )
-        subprocess.run(
-            [
-                "git",
-                "commit",
-                "-m",
-                "Meeting update at {}".format(dt.isoformat()),
-            ],
-            cwd=git_repo_dir,
-            env=git_env,
+        council_twitter_bot.save_snapshot_in_git_repo(
+            git_repo_dir, event, dt
         )
 
 
